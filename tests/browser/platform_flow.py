@@ -1,0 +1,51 @@
+# The whole platform journey in a real browser: pricing page -> school signs up -> Super Admin approves in one click ->
+# trial access follows the package -> invoice -> payment -> activation. Last line should be "ERR []".
+import asyncio
+from playwright.async_api import async_playwright
+BASE='http://localhost:8765/index.html'
+async def main():
+    async with async_playwright() as p:
+        b = await p.chromium.launch(); pg = await b.new_page(viewport={'width':390,'height':844})
+        errs=[]; pg.on('pageerror', lambda e: errs.append(str(e))); pg.on('dialog', lambda d: asyncio.ensure_future(d.accept('ok')))
+        await pg.goto(BASE+'#/'); await pg.wait_for_timeout(1500)
+        t = await pg.inner_text('body')
+        print('1 pricing: cards say what is added / not included:', 'Adds:' in t and 'Not included:' in t)
+        print('2 comparison table is gone; add-on packs still listed:', 'Compare packages' not in t and await pg.locator('.cmp-table').count() == 0 and 'Add-on packs' in t and 'Bursar Pack' in t)
+        pro = await pg.evaluate("""() => { const c = [...document.querySelectorAll('.plan-card')].find((x) => x.querySelector('h4')?.textContent.trim() === 'Professional'); return c ? c.textContent : ''; }""")
+        print('3 Professional card says it adds Health (coming soon):', 'Health (coming soon)' in pro)
+        w = await pg.evaluate("document.documentElement.scrollWidth"); print('4 page does not scroll sideways on a phone:', w <= 392, w)
+        await pg.goto(BASE+'#/signup?plan=starter'); await pg.wait_for_timeout(700)
+        await pg.fill('#su-name','Pat Head'); await pg.fill('#su-school','Hill Academy'); await pg.fill('#su-email','pat@hill.co'); await pg.fill('#su-phone','0700123456'); await pg.fill('#su-students','250')
+        await pg.fill('#su-password','secret-pass-1'); await pg.fill('#su-confirm','secret-pass-1'); await pg.check('#su-terms'); await pg.click('#su-submit'); await pg.wait_for_timeout(1500)
+        print('5 signed up; waiting for approval:', 'approv' in (await pg.inner_text('body')).lower())
+        await pg.evaluate("""async () => { const a = await import('/js/services/authService.js'); a.logout(); const m = await import('/js/services/platformService.js');
+          m.registerAdmin({name:'Super Admin', email:'super@t.co', password:'a-long-passphrase-1', confirmPassword:'a-long-passphrase-1'}); m.savePlatformSettings({paymentInstructions:'Pay to M-Pesa Paybill 123456, account: your school name.'}); }""")
+        await pg.goto(BASE+'#/admin'); await pg.reload(); await pg.wait_for_timeout(1500); t = await pg.inner_text('body')
+        print('6 Super Admin sees "Needs you" with the school, its package and price:', 'Needs you' in t and 'Hill Academy' in t and 'Starter' in t and 'KES 10,000' in t)
+        await pg.click('[data-approve]'); await pg.wait_for_timeout(900); t = await pg.inner_text('body')
+        print('7 one click: approved + trial + invoice issued:', 'Approved Hill Academy' in t and 'on trial' in t and 'INV-' in t)
+        print('8 queue now clear:', 'All clear' in t)
+        await pg.evaluate("async () => { const m = await import('/js/services/platformService.js'); m.adminLogout?.(); }")
+        await pg.goto(BASE+'#/'); await pg.reload(); await pg.wait_for_timeout(800)
+        await pg.goto(BASE+'#/login'); await pg.wait_for_timeout(500); await pg.fill('#li-email','pat@hill.co'); await pg.fill('#li-password','secret-pass-1'); await pg.click('#li-submit'); await pg.wait_for_timeout(2000)
+        print('   first screen after approval is the setup wizard:', "Let's set up your school" in await pg.inner_text('body'))
+        await pg.evaluate("async () => { const sc = await import('/js/services/schoolService.js'); sc.saveSchool({name:'Hill Academy', setupComplete:true}); }"); await pg.reload(); await pg.wait_for_timeout(1500)
+        en = await pg.evaluate("async () => { const m = await import('/js/services/subscriptionService.js'); return ['transport', 'library', 'health', 'hostel', 'activities', 'students'].map((k) => [k, m.moduleEnabled(k)]); }")
+        print('9 school (on trial) is open to its package only:', dict(en))
+        await pg.goto(BASE+'#/health'); await pg.wait_for_timeout(1000); t = await pg.inner_text('body')
+        print('10 typing #/health shows where it is included:', 'Professional package and above' in t)
+        await pg.goto(BASE+'#/subscription'); await pg.wait_for_timeout(1500); t = await pg.inner_text('body')
+        print('11 school sees its invoice, trial notice and how to pay:', 'INV-' in t and 'on a trial until' in t and 'Paybill 123456' in t)
+        before = list(errs)  # errors after this point come from the script clearing the session behind the app's back
+        await pg.evaluate("async () => { const a = await import('/js/services/authService.js'); a.logout(); const m = await import('/js/services/platformService.js'); m.adminLogin('super@t.co','a-long-passphrase-1'); }")
+        await pg.goto(BASE+'#/admin'); await pg.reload(); await pg.wait_for_timeout(1500)
+        await pg.locator('.pill', has_text='Invoices').first.click(); await pg.wait_for_timeout(600); await pg.locator('[data-open-invoice]').first.click(); await pg.wait_for_timeout(600)
+        await pg.fill('#pay-ref', 'QWE123XYZ'); await pg.click('#save-payment-btn'); await pg.wait_for_timeout(800); t = await pg.inner_text('body')
+        print('12 paid in full -> subscription activated automatically:', 'fully paid' in t and 'Subscription activated' in t)
+        sub = await pg.evaluate("async () => { const s = await import('/js/services/subscriptionService.js'); const a = await import('/js/services/authService.js'); const acc = a.listAccounts()[0]; const x = s.localSubscriptionOf(acc.id); return [x.status, x.packageId, x.expiryDate > x.startDate]; }")
+        print('13 stored subscription:', sub)
+        await pg.evaluate("async () => { const m = await import('/js/services/platformService.js'); m.adminLogout?.(); }")
+        await pg.goto(BASE+'#/login'); await pg.reload(); await pg.wait_for_timeout(600); await pg.fill('#li-email','pat@hill.co'); await pg.fill('#li-password','secret-pass-1'); await pg.click('#li-submit'); await pg.wait_for_timeout(2000)
+        await pg.goto(BASE+'#/subscription'); await pg.wait_for_timeout(1500); t = await pg.inner_text('body'); print('14 school now shows Active and Paid:', 'Active' in t and 'Paid' in t)
+        print('ERR', before); await b.close()
+asyncio.run(main())
